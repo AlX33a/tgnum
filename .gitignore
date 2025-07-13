@@ -5,5 +5,5 @@ getgems_offers.db
 chats.json
 sent_floor_alerts.json
 config.yaml
-*shm
-*wal
+getgems_offers.db-wal
+getgems_offers.db-shm
