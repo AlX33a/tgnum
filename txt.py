@@ -27,7 +27,7 @@ def concatenate_files(root_dir: str, output_file: str):
 
 if __name__ == "__main__":
     # Директория с файлами
-    root_directory = os.path.join(os.path.dirname(__file__), "v1")
+    root_directory = os.path.join(os.path.dirname(__file__), "v1.1")
     # Итоговый файл
     output_filename = os.path.join(os.path.dirname(__file__), "all.txt")
 
