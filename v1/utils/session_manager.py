@@ -13,7 +13,7 @@ class SessionManager:
         self.logger = setup_logger("session_manager", cfg["log_level"])
         self.session = self._create_base_session()
 
-    def _create_base_session(self) -> requests.Session:
+    def _create_base_session(self):
         retry = Retry(
             total=self.cfg["retry_total"],
             backoff_factor=self.cfg["retry_backoff_factor"],
@@ -46,12 +46,22 @@ class SessionManager:
         return {"http": url, "https": url}
 
     def request(self, method: str, url: str, **kwargs) -> requests.Response:
+        # Заголовки
         headers = self._get_headers()
         kwargs.setdefault("headers", headers)
-        kwargs.setdefault("timeout", (self.cfg["connect_timeout"], self.cfg["read_timeout"]))
+
+        # Выбираем таймауты: для Telegram или для остальных
+        if "api.telegram.org" in url:
+            timeout = (self.cfg["tg_connect_timeout"], self.cfg["tg_read_timeout"])
+        else:
+            timeout = (self.cfg["connect_timeout"], self.cfg["read_timeout"])
+        kwargs.setdefault("timeout", timeout)
+
+        # Прокси
         if self.cfg.get("enable_proxy", False):
             kwargs["proxies"] = self._get_proxy()
-        self.logger.debug(f"{method} {url} via proxy {kwargs.get('proxies')}")
+
+        self.logger.debug(f"{method} {url} timeout={timeout} via proxy {kwargs.get('proxies')}")
         return self.session.request(method, url, **kwargs)
 
     def get(self, url: str, **kwargs) -> requests.Response:

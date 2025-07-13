@@ -2,14 +2,11 @@ import sqlite3
 
 def get_connection(path: str = "getgems_offers.db") -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
-    # Включаем WAL и настраиваем synchronous
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
     return conn
 
 def init_tables(conn):
     cur = conn.cursor()
-    # (существующая логика создания таблиц)
+    # Создание основной таблицы с офферами
     cur.execute("""
       CREATE TABLE IF NOT EXISTS nft_offers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

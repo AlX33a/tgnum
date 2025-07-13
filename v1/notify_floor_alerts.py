@@ -5,125 +5,153 @@ import sqlite3
 import time
 import logging
 import json
+import signal
+import sys
 from pathlib import Path
+
+from utils.config import load_config
 from utils.session_manager import SessionManager
 
-def load_chats(chats_file):
-    if chats_file.exists():
-        return set(json.loads(chats_file.read_text()))
+cfg = load_config("prod")
+DB_PATH = Path("getgems_offers.db")
+TABLE = "nft_offers"
+
+SUPER_IMPORTANT_FACTOR = 0.96  # −4%
+HALF_THRESHOLD_FACTOR     = 0.98  # −2%
+
+BOT_TOKEN = cfg["bot_token"]
+API_URL   = f"https://api.telegram.org/bot{BOT_TOKEN}"
+SEND_URL  = API_URL + "/sendMessage"
+UPD_URL   = API_URL + "/getUpdates"
+CHATS_FILE = Path("chats.json")
+DELAY      = cfg.get("notify_interval_seconds", 60)
+
+# Сессия сама выберет таймаут для Telegram по URL
+session = SessionManager(cfg)
+
+logging.basicConfig(
+    level=getattr(logging, cfg["log_level"].upper(), logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("floor_alerts.log", encoding="utf-8")
+    ]
+)
+logger = logging.getLogger(__name__)
+
+def load_chats() -> set:
+    if CHATS_FILE.exists():
+        return set(json.loads(CHATS_FILE.read_text(encoding="utf-8")))
     return set()
 
-def save_chats(chats_file, chats):
-    chats_file.write_text(json.dumps(list(chats)))
+def save_chats(chats: set):
+    CHATS_FILE.write_text(json.dumps(list(chats)), encoding="utf-8")
 
-def update_chats(session_manager, bot_token, chats_file):
-    known_chats = load_chats(chats_file)
-    api_url = f"https://api.telegram.org/bot{bot_token}"
-    updates_url = api_url + "/getUpdates"
+def update_chats() -> set:
+    ks = load_chats()
     try:
-        resp = session_manager.get(updates_url)
-        resp.raise_for_status()
-        for update in resp.json().get("result", []):
-            if "message" in update:
-                known_chats.add(update["message"]["chat"]["id"])
-            if "callback_query" in update:
-                known_chats.add(update["callback_query"]["from"]["id"])
-        if resp.json().get("result"):
-            last_update_id = resp.json()["result"][-1]["update_id"]
-            session_manager.get(f"{updates_url}?offset={last_update_id+1}")
+        r = session.get(UPD_URL)
+        r.raise_for_status()
+        items = r.json().get("result", [])
+        for upd in items:
+            if "message" in upd:
+                ks.add(upd["message"]["chat"]["id"])
+            if "callback_query" in upd:
+                ks.add(upd["callback_query"]["from"]["id"])
+        if items:
+            last_id = items[-1]["update_id"]
+            session.get(f"{UPD_URL}?offset={last_id+1}")
     except Exception as e:
-        logging.error(f"Error updating chats: {e}")
-    save_chats(chats_file, known_chats)
-    return known_chats
+        logger.warning("getUpdates error: %s", e)
+    save_chats(ks)
+    logger.info("Known chats: %d", len(ks))
+    return ks
 
-def fetch_offers(conn, table_name):
+def fetch_offers(conn: sqlite3.Connection) -> list:
     cur = conn.cursor()
-    cur.execute(f"SELECT id, token_address, sale_price, royalty_amount, fee_total FROM {table_name} WHERE sale_price IS NOT NULL")
+    cur.execute(f"""
+        SELECT id, token_address, sale_price, sale_fee,
+               royalty_amount, fee_total, updated_at, created_at
+          FROM {TABLE}
+         WHERE sale_price IS NOT NULL
+    """)
     return cur.fetchall()
 
-def calculate_floor_thresholds(offers):
-    effective_prices = []
-    for _, _, sale_price, _, fee_total in offers:
-        effective_price = (sale_price or 0) + (fee_total or 0)
-        effective_prices.append(effective_price)
-    if len(effective_prices) < 2:
-        return None, None
-    effective_prices.sort()
-    return effective_prices[0], effective_prices[1]
+def send_all(chats: set, text: str):
+    for cid in chats:
+        try:
+            session.post(
+                SEND_URL,
+                json={"chat_id": cid, "text": text, "disable_web_page_preview": True}
+            )
+        except Exception as e:
+            logger.error("Send error to %s: %s", cid, e)
 
-def send_notification(session_manager, bot_token, chat_id, message):
-    api_url = f"https://api.telegram.org/bot{bot_token}"
-    send_url = api_url + "/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "disable_web_page_preview": True
-    }
-    try:
-        resp = session_manager.post(send_url, json=payload)
-        if resp.status_code != 200:
-            logging.warning(f"Failed to send to {chat_id}: {resp.text}")
-    except Exception as e:
-        logging.error(f"Error sending to {chat_id}: {e}")
+def make_message(url: str, rec: dict, level: str) -> str:
+    lines = [f"{level}\n{url}"]
+    for k, v in rec.items():
+        lines.append(f"{k}: {v}")
+    return "\n".join(lines)
 
-def send_to_all_chats(session_manager, bot_token, chats, message):
-    for chat_id in chats:
-        send_notification(session_manager, bot_token, chat_id, message)
+def shutdown(signum, frame):
+    logger.info("Signal %s received, shutdown", signum)
+    chats = load_chats()
+    send_all(chats, "⚠️ Нотификатор floor gap выключается")
+    sys.exit(0)
 
-def main(cfg):
-    db_path = Path("getgems_offers.db")
-    table_name = "nft_offers"
-    chats_file = Path("chats.json")
-    bot_token = cfg["bot_token"]
-    notify_interval = cfg.get("notify_interval_seconds", 60)
-    floor_threshold_percent = cfg.get("floor_threshold_percent", 4)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s"
-    )
-    logger = logging.getLogger(__name__)
-    if not db_path.exists():
-        logger.error(f"Database not found: {db_path}")
+def main():
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    if not DB_PATH.exists():
+        logger.error("DB not found: %s", DB_PATH)
         return
-    session_manager = SessionManager(cfg)
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    seen_offers = set()
-    chats = update_chats(session_manager, bot_token, chats_file)
-    startup_message = "🔔 GetGems Floor Alert Bot запущен и готов к работе!"
-    send_to_all_chats(session_manager, bot_token, chats, startup_message)
-    logger.info(f"Startup notification sent to {len(chats)} chats")
-    try:
-        while True:
-            chats = update_chats(session_manager, bot_token, chats_file)
-            offers = fetch_offers(conn, table_name)
-            floor_price, second_price = calculate_floor_thresholds(offers)
-            if floor_price is not None and second_price is not None:
-                threshold_price = second_price * (1 - floor_threshold_percent / 100)
-                for offer_id, token_address, sale_price, _, fee_total in offers:
-                    effective_price = (sale_price or 0) + (fee_total or 0)
-                    if offer_id not in seen_offers and effective_price <= threshold_price:
-                        offer_url = f"https://getgems.io/collection/{cfg['collection_address']}/{token_address}?modalId=sale_info"
-                        message = (
-                            f"🔔 Floor gap alert:\n"
-                            f"{offer_url}\n"
-                            f"Effective: {effective_price:.4f} TON\n"
-                            f"Floor: {floor_price:.4f} TON\n"
-                            f"2nd: {second_price:.4f} TON\n"
-                            f"Gap: {((second_price - effective_price) / second_price * 100):.1f}%"
-                        )
-                        send_to_all_chats(session_manager, bot_token, chats, message)
-                        seen_offers.add(offer_id)
-                        logger.info(f"Alert sent for offer {offer_id} at {effective_price:.4f} TON")
-            time.sleep(notify_interval)
-    except KeyboardInterrupt:
-        logger.info("Shutting down notification service...")
-        shutdown_message = "🔔 GetGems Floor Alert Bot завершает работу"
-        send_to_all_chats(session_manager, bot_token, chats, shutdown_message)
-        logger.info(f"Shutdown notification sent to {len(chats)} chats")
-    finally:
-        conn.close()
+
+    chats = update_chats()
+    if chats:
+        send_all(chats, "🔔 Нотификатор floor gap запущен")
+
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    notified = set()
+
+    while True:
+        try:
+            chats = update_chats()
+            rows = fetch_offers(conn)
+            recs = []
+            for oid, token, p, fee, roy, ft, upd, crt in rows:
+                eff = p + fee
+                recs.append((oid, token, eff, {
+                    "sale_price": p,
+                    "sale_fee": fee,
+                    "royalty_amount": roy,
+                    "fee_total": ft,
+                    "updated_at": upd,
+                    "created_at": crt
+                }))
+
+            effs = sorted(r[2] for r in recs)
+            if len(effs) >= 2:
+                floor, second = effs[0], effs[1]
+                super_thr = floor * SUPER_IMPORTANT_FACTOR
+                half_thr  = floor * HALF_THRESHOLD_FACTOR
+
+                for oid, token, eff, rec in recs:
+                    if oid in notified:
+                        continue
+                    url = f"https://getgems.io/collection/{cfg['collection_address']}/{token}?modalId=sale_info"
+                    if eff <= super_thr:
+                        msg = make_message(url, rec, "🔥 СУПЕР ВАЖНЫЙ АЛЕРТ (−4%)")
+                        send_all(chats, msg)
+                        notified.add(oid)
+                    elif eff <= half_thr:
+                        msg = make_message(url, rec, "⚠️ ПОЛУТРЕШ АЛЕРТ (−2%)")
+                        send_all(chats, msg)
+                        notified.add(oid)
+        except Exception as e:
+            logger.exception("Notification loop error: %s", e)
+
+        time.sleep(DELAY)
 
 if __name__ == "__main__":
-    from utils.config import load_config
-    cfg = load_config("prod")
-    main(cfg)
+    main()
