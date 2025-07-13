@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+notify_floor_alerts.py
+
+Нотификатор floor gap с дополнительными категориями:
+— “Трэш” для всех новых офферов в топ-5 (независимо от цены),
+— “Полутреш” для офферов ≤ floor * 0.98 (−2%),
+— “Супер важный” для офферов ≤ floor * 0.96 (−4%).
+"""
+
 import sqlite3
 import time
 import logging
@@ -12,12 +21,14 @@ from pathlib import Path
 from utils.config import load_config
 from utils.session_manager import SessionManager
 
+# --- Настройки ---
 cfg = load_config("prod")
 DB_PATH = Path("getgems_offers.db")
 TABLE = "nft_offers"
 
-SUPER_IMPORTANT_FACTOR = 0.96  # −4%
-HALF_THRESHOLD_FACTOR     = 0.98  # −2%
+TRASH_COUNT = 5               # число офферов в топ-5 для “трэша”
+SUPER_FACTOR = 0.96           # −4%
+HALF_FACTOR  = 0.98           # −2%
 
 BOT_TOKEN = cfg["bot_token"]
 API_URL   = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -26,7 +37,6 @@ UPD_URL   = API_URL + "/getUpdates"
 CHATS_FILE = Path("chats.json")
 DELAY      = cfg.get("notify_interval_seconds", 60)
 
-# Сессия сама выберет таймаут для Telegram по URL
 session = SessionManager(cfg)
 
 logging.basicConfig(
@@ -52,15 +62,14 @@ def update_chats() -> set:
     try:
         r = session.get(UPD_URL)
         r.raise_for_status()
-        items = r.json().get("result", [])
-        for upd in items:
-            if "message" in upd:
-                ks.add(upd["message"]["chat"]["id"])
-            if "callback_query" in upd:
-                ks.add(upd["callback_query"]["from"]["id"])
-        if items:
-            last_id = items[-1]["update_id"]
-            session.get(f"{UPD_URL}?offset={last_id+1}")
+        for u in r.json().get("result", []):
+            if "message" in u:
+                ks.add(u["message"]["chat"]["id"])
+            if "callback_query" in u:
+                ks.add(u["callback_query"]["from"]["id"])
+        if r.json().get("result"):
+            last = r.json()["result"][-1]["update_id"]
+            session.get(f"{UPD_URL}?offset={last+1}")
     except Exception as e:
         logger.warning("getUpdates error: %s", e)
     save_chats(ks)
@@ -70,12 +79,24 @@ def update_chats() -> set:
 def fetch_offers(conn: sqlite3.Connection) -> list:
     cur = conn.cursor()
     cur.execute(f"""
-        SELECT id, token_address, sale_price, sale_fee,
-               royalty_amount, fee_total, updated_at, created_at
+        SELECT token_address, sale_price, sale_fee, royalty_amount, fee_total, created_at
           FROM {TABLE}
          WHERE sale_price IS NOT NULL
+         ORDER BY (sale_price + sale_fee) ASC
+         LIMIT {TRASH_COUNT}
     """)
     return cur.fetchall()
+
+def compute_thresholds(prices: list) -> tuple:
+    if len(prices) < 2:
+        return None, None
+    return prices[0], prices[1]
+
+def make_message(url: str, rec: dict, label: str) -> str:
+    lines = [f"{label}\n{url}"]
+    for k, v in rec.items():
+        lines.append(f"{k}: {v}")
+    return "\n".join(lines)
 
 def send_all(chats: set, text: str):
     for cid in chats:
@@ -86,12 +107,6 @@ def send_all(chats: set, text: str):
             )
         except Exception as e:
             logger.error("Send error to %s: %s", cid, e)
-
-def make_message(url: str, rec: dict, level: str) -> str:
-    lines = [f"{level}\n{url}"]
-    for k, v in rec.items():
-        lines.append(f"{k}: {v}")
-    return "\n".join(lines)
 
 def shutdown(signum, frame):
     logger.info("Signal %s received, shutdown", signum)
@@ -112,42 +127,45 @@ def main():
         send_all(chats, "🔔 Нотификатор floor gap запущен")
 
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    notified = set()
+    seen_trash = set()
+    seen_half  = set()
+    seen_super = set()
 
     while True:
         try:
             chats = update_chats()
             rows = fetch_offers(conn)
-            recs = []
-            for oid, token, p, fee, roy, ft, upd, crt in rows:
-                eff = p + fee
-                recs.append((oid, token, eff, {
+            # список эффективных цен
+            effs = [p + f for _, p, f, _, _, _ in rows]
+            floor, second = compute_thresholds(effs) or (None, None)
+            # обходим топ-5
+            for idx, (token, p, f, ramt, ftot, created) in enumerate(rows, start=1):
+                eff = p + f
+                url = f"https://getgems.io/collection/{cfg['collection_address']}/{token}?modalId=sale_info"
+                rec = {
                     "sale_price": p,
-                    "sale_fee": fee,
-                    "royalty_amount": roy,
-                    "fee_total": ft,
-                    "updated_at": upd,
-                    "created_at": crt
-                }))
-
-            effs = sorted(r[2] for r in recs)
-            if len(effs) >= 2:
-                floor, second = effs[0], effs[1]
-                super_thr = floor * SUPER_IMPORTANT_FACTOR
-                half_thr  = floor * HALF_THRESHOLD_FACTOR
-
-                for oid, token, eff, rec in recs:
-                    if oid in notified:
-                        continue
-                    url = f"https://getgems.io/collection/{cfg['collection_address']}/{token}?modalId=sale_info"
-                    if eff <= super_thr:
-                        msg = make_message(url, rec, "🔥 СУПЕР ВАЖНЫЙ АЛЕРТ (−4%)")
-                        send_all(chats, msg)
-                        notified.add(oid)
-                    elif eff <= half_thr:
-                        msg = make_message(url, rec, "⚠️ ПОЛУТРЕШ АЛЕРТ (−2%)")
-                        send_all(chats, msg)
-                        notified.add(oid)
+                    "sale_fee": f,
+                    "royalty_amount": ramt,
+                    "fee_total": ftot,
+                    "created_at": created
+                }
+                # Трэш: все новые в топ-5
+                if token not in seen_trash:
+                    label = f"🗑️ Трэш-алерт: новое предложение #{idx}"
+                    send_all(chats, make_message(url, rec, label))
+                    seen_trash.add(token)
+                # Полутреш и супер важный только если есть пороги
+                if floor is not None and second is not None:
+                    super_thr = floor * SUPER_FACTOR
+                    half_thr  = floor * HALF_FACTOR
+                    if eff <= half_thr and token not in seen_half:
+                        label = "⚠️ Полутреш-алерт (−2%)"
+                        send_all(chats, make_message(url, rec, label))
+                        seen_half.add(token)
+                    if eff <= super_thr and token not in seen_super:
+                        label = "🔥 Супер-алерт (−4%)"
+                        send_all(chats, make_message(url, rec, label))
+                        seen_super.add(token)
         except Exception as e:
             logger.exception("Notification loop error: %s", e)
 
