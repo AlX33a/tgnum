@@ -18,7 +18,7 @@ from pathlib import Path
 DB_PATH    = Path("getgems_offers.db")
 TABLE      = "nft_offers_verified"
 PRICE_TH   = 886.0
-BOT_TOKEN  = "8030913567:AAHoDGFQBvMwt_UJbTiNXISmrHMAVbdwzSQ"
+BOT_TOKEN  = ""
 API_URL    = f"https://api.telegram.org/bot{BOT_TOKEN}"
 SEND_URL   = API_URL + "/sendMessage"
 UPDATES_URL= API_URL + "/getUpdates"
