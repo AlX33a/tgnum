@@ -4,7 +4,6 @@ beautifulsoup4
 urllib3
 aiosqlite
 aiohttp
-aiohttp
 aiohttp-retry
 aiohttp-proxy
 aiosqlite
