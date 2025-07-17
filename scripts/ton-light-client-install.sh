@@ -1,417 +1,418 @@
 #!/bin/bash
 
-# TON Light Client Auto-Installation Script
-# Версия: 1.0
-# Дата: 2025-01-18
-# Автор: Эксперт по автоматизации Linux
-# Описание: Полная установка, настройка и запуск TON Light Client на Ubuntu 22.04
+# Полный скрипт установки TON Light Client (liteserver) на Ubuntu 22.04
+# Исправленная версия для работы с актуальным mytonctrl
 
-set -e  # Остановка при первой ошибке
+set -e  # Останавливаться при первой ошибке
+
+# Глобальные переменные
+LOG_FILE="/var/log/ton-install.log"
+TONUSER="tonuser"
+INSTALL_DIR="/opt/ton"
+MYTONCTRL_DIR="/usr/local/bin/mytonctrl"
+TEMP_DIR="/tmp/ton-install"
 
 # Цвета для вывода
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # Без цвета
+NC='\033[0m' # No Color
 
-# Глобальные переменные
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-LOG_FILE="/var/log/ton-install.log"
-WORKDIR="/root"
-TON_USER="tonuser"
-REQUIRED_DEPS="build-essential cmake clang git ninja-build zlib1g-dev libssl-dev libsecp256k1-dev libmicrohttpd-dev libsodium-dev pkg-config gperf libreadline-dev ccache wget curl"
-
-# Функция логирования
-log() {
-    echo -e "$1" | tee -a "$LOG_FILE"
-}
-
-# Анимированный спиннер
-spinner() {
-    local pid=$1
+# Функция вывода сообщений
+log_message() {
+    local level=$1
     local message=$2
-    local delay=0.1
-    local spinstr='|/-\'
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
-    echo -ne "${BLUE}$message${NC} "
-    
-    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
-        local temp=${spinstr#?}
-        printf "${YELLOW}[%c]${NC}" "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b"
-    done
-    
-    wait $pid
-    local exit_code=$?
-    
-    if [ $exit_code -eq 0 ]; then
-        printf "${GREEN}[✓]${NC}\n"
-    else
-        printf "${RED}[✗]${NC}\n"
-        log "${RED}ОШИБКА: $message завершено с кодом $exit_code${NC}"
-        exit $exit_code
-    fi
-}
-
-# Анимированный прогресс-бар
-progress_bar() {
-    local duration=$1
-    local message=$2
-    local width=50
-    
-    echo -ne "${BLUE}$message${NC} "
-    
-    for ((i=0; i<=duration; i++)); do
-        local percent=$((i * 100 / duration))
-        local filled=$((i * width / duration))
-        
-        printf "\r${BLUE}$message${NC} ["
-        printf "%*s" $filled | tr ' ' '='
-        printf "%*s" $((width - filled)) | tr ' ' '-'
-        printf "] %d%%" $percent
-        
-        sleep 0.1
-    done
-    
-    printf " ${GREEN}[ЗАВЕРШЕНО]${NC}\n"
-}
-
-# Функция проверки прав root
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        log "${RED}ОШИБКА: Скрипт должен запускаться с правами root${NC}"
-        log "${YELLOW}Используйте: sudo bash $0${NC}"
-        exit 1
-    fi
-}
-
-# Функция создания пользователя
-create_user() {
-    log "${GREEN}=== СОЗДАНИЕ ПОЛЬЗОВАТЕЛЯ $TON_USER ===${NC}"
-    
-    if id "$TON_USER" &>/dev/null; then
-        log "${YELLOW}Пользователь $TON_USER уже существует${NC}"
-    else
-        {
-            adduser --disabled-password --gecos "" "$TON_USER"
-            usermod -aG sudo "$TON_USER"
-            echo "$TON_USER:ton123" | chpasswd
-        } &
-        spinner $! "Создание пользователя $TON_USER"
-        
-        log "${GREEN}Пользователь $TON_USER создан успешно${NC}"
-    fi
-}
-
-# Функция очистки предыдущих установок
-clean() {
-    log "${GREEN}=== ОЧИСТКА ПРЕДЫДУЩИХ УСТАНОВОК ===${NC}"
-    
-    {
-        # Остановка всех связанных процессов
-        pkill -f "validator-engine" || true
-        pkill -f "lite-client" || true
-        pkill -f "mytonctrl" || true
-        systemctl stop validator.service || true
-        systemctl stop mytoncore.service || true
-        systemctl disable validator.service || true
-        systemctl disable mytoncore.service || true
-        
-        # Удаление пакетов
-        apt-get remove -y --purge mytonctrl 2>/dev/null || true
-        pip3 uninstall -y mytonctrl 2>/dev/null || true
-        pip3 uninstall -y ton-http-api 2>/dev/null || true
-        
-        # Удаление файлов и директорий
-        rm -rf /usr/src/ton
-        rm -rf /usr/src/mytonctrl
-        rm -rf /usr/bin/ton
-        rm -rf /var/ton-work
-        rm -rf /var/ton-dht-server
-        rm -rf /etc/systemd/system/validator.service
-        rm -rf /etc/systemd/system/mytoncore.service
-        rm -rf /usr/local/bin/mytonctrl
-        rm -rf /usr/local/bin/mytoncore
-        rm -rf ~/.local/share/mytoncore
-        
-        # Удаление пользователей и групп
-        userdel -r validator 2>/dev/null || true
-        groupdel validator 2>/dev/null || true
-        
-        # Очистка логов
-        rm -f /var/log/ton*.log
-        rm -f /tmp/ton*.log
-        
-        # Перезагрузка systemd
-        systemctl daemon-reload
-        
-        # Очистка кеша apt
-        apt-get clean
-        apt-get autoclean
-        apt-get autoremove -y
-    } &
-    
-    spinner $! "Очистка предыдущих установок"
-    log "${GREEN}Очистка завершена успешно${NC}"
-}
-
-# Функция установки зависимостей
-install_deps() {
-    log "${GREEN}=== УСТАНОВКА ЗАВИСИМОСТЕЙ ===${NC}"
-    
-    {
-        # Обновление репозиториев
-        apt-get update -y
-        apt-get upgrade -y
-        
-        # Установка основных зависимостей
-        apt-get install -y $REQUIRED_DEPS
-        
-        # Установка дополнительных Python пакетов
-        apt-get install -y python3 python3-pip python3-dev python3-venv
-        
-        # Установка LLVM 16
-        if ! command -v clang-16 &> /dev/null; then
-            wget -O - https://apt.llvm.org/llvm.sh | bash -s -- 16 all
-        fi
-        
-        # Обновление альтернатив для clang
-        update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100
-        update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-16 100
-        
-    } &
-    
-    spinner $! "Установка зависимостей"
-    log "${GREEN}Зависимости установлены успешно${NC}"
-}
-
-# Функция сборки TON
-build() {
-    log "${GREEN}=== СБОРКА TON LIGHT CLIENT ===${NC}"
-    
-    cd "$WORKDIR"
-    
-    # Скачивание скрипта установки mytonctrl
-    {
-        wget -O install.sh https://raw.githubusercontent.com/ton-blockchain/mytonctrl/master/scripts/install.sh
-        chmod +x install.sh
-    } &
-    
-    spinner $! "Скачивание скрипта установки mytonctrl"
-    
-    # Установка mytonctrl в режиме liteserver
-    {
-        # Переключение на пользователя tonuser для установки
-        sudo -u "$TON_USER" bash -c "
-            cd /home/$TON_USER
-            wget -O install.sh https://raw.githubusercontent.com/ton-blockchain/mytonctrl/master/scripts/install.sh
-            chmod +x install.sh
-            bash install.sh -m liteserver -i -d
-        "
-    } &
-    
-    spinner $! "Установка mytonctrl в режиме liteserver"
-    
-    # Проверка установки
-    if [ ! -f "/usr/bin/ton/lite-client/lite-client" ]; then
-        log "${RED}ОШИБКА: lite-client не найден после установки${NC}"
-        exit 1
-    fi
-    
-    log "${GREEN}Сборка TON Light Client завершена успешно${NC}"
-}
-
-# Функция запуска Light Client
-run_lightclient() {
-    log "${GREEN}=== ЗАПУСК TON LIGHT CLIENT ===${NC}"
-    
-    # Проверка существования конфигурационного файла
-    local config_file="/usr/bin/ton/global.config.json"
-    if [ ! -f "$config_file" ]; then
-        {
-            wget -O "$config_file" https://ton-blockchain.github.io/global.config.json
-        } &
-        spinner $! "Скачивание конфигурации сети"
-    fi
-    
-    # Создание systemd сервиса для Light Client
-    cat > /etc/systemd/system/ton-liteclient.service << EOF
-[Unit]
-Description=TON Light Client
-After=network.target
-Wants=network.target
-
-[Service]
-Type=simple
-User=$TON_USER
-Group=$TON_USER
-WorkingDirectory=/home/$TON_USER
-ExecStart=/usr/bin/ton/lite-client/lite-client -C $config_file
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    # Запуск сервиса
-    {
-        systemctl daemon-reload
-        systemctl enable ton-liteclient.service
-        systemctl start ton-liteclient.service
-    } &
-    
-    spinner $! "Запуск TON Light Client"
-    log "${GREEN}TON Light Client запущен успешно${NC}"
-}
-
-# Функция ожидания синхронизации
-wait_sync() {
-    log "${GREEN}=== ОЖИДАНИЕ СИНХРОНИЗАЦИИ ===${NC}"
-    
-    local max_attempts=180  # 30 минут (180 попыток по 10 секунд)
-    local attempt=0
-    local sync_status=""
-    
-    while [ $attempt -lt $max_attempts ]; do
-        # Проверка статуса через mytonctrl
-        if command -v mytonctrl &> /dev/null; then
-            sync_status=$(sudo -u "$TON_USER" timeout 5 mytonctrl -c "status" 2>/dev/null | grep -i "out of sync" | awk '{print $NF}' || echo "")
-            
-            if [[ "$sync_status" =~ ^[0-9]+$ ]] && [ "$sync_status" -lt 20 ]; then
-                log "${GREEN}Синхронизация завершена! Out of sync: $sync_status секунд${NC}"
-                return 0
-            fi
-        fi
-        
-        # Анимация ожидания
-        local spinner_chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-        local spinner_index=$((attempt % 10))
-        local spinner_char=${spinner_chars:$spinner_index:1}
-        
-        printf "\r${BLUE}Ожидание синхронизации...${NC} ${YELLOW}$spinner_char${NC} [Попытка $((attempt+1))/$max_attempts]"
-        
-        sleep 10
-        ((attempt++))
-    done
-    
-    printf "\n${YELLOW}Внимание: Синхронизация может занять больше времени${NC}\n"
-    log "${YELLOW}Синхронизация не завершена за отведенное время${NC}"
-}
-
-# Функция проверки системы
-check_system() {
-    log "${GREEN}=== ПРОВЕРКА СИСТЕМЫ ===${NC}"
-    
-    # Проверка версии Ubuntu
-    if [ ! -f /etc/lsb-release ]; then
-        log "${RED}ОШИБКА: Не найден файл /etc/lsb-release${NC}"
-        exit 1
-    fi
-    
-    . /etc/lsb-release
-    
-    if [ "$DISTRIB_ID" != "Ubuntu" ]; then
-        log "${RED}ОШИБКА: Поддерживается только Ubuntu${NC}"
-        exit 1
-    fi
-    
-    if [ "$DISTRIB_RELEASE" != "22.04" ]; then
-        log "${YELLOW}Предупреждение: Рекомендуется Ubuntu 22.04${NC}"
-    fi
-    
-    # Проверка свободного места
-    local free_space=$(df / | tail -1 | awk '{print $4}')
-    if [ "$free_space" -lt 10485760 ]; then  # 10GB в KB
-        log "${RED}ОШИБКА: Недостаточно свободного места (минимум 10GB)${NC}"
-        exit 1
-    fi
-    
-    # Проверка оперативной памяти
-    local total_ram=$(free -m | awk 'NR==2{print $2}')
-    if [ "$total_ram" -lt 2048 ]; then  # 2GB в MB
-        log "${YELLOW}Предупреждение: Рекомендуется минимум 2GB ОЗУ${NC}"
-    fi
-    
-    log "${GREEN}Проверка системы завершена${NC}"
-}
-
-# Функция отображения статуса
-show_status() {
-    log "${GREEN}=== СТАТУС УСТАНОВКИ ===${NC}"
-    
-    # Проверка статуса сервисов
-    if systemctl is-active --quiet ton-liteclient.service; then
-        log "${GREEN}✓ TON Light Client: Активен${NC}"
-    else
-        log "${RED}✗ TON Light Client: Неактивен${NC}"
-    fi
-    
-    if systemctl is-active --quiet mytoncore.service; then
-        log "${GREEN}✓ MyTonCore: Активен${NC}"
-    else
-        log "${YELLOW}⚠ MyTonCore: Неактивен${NC}"
-    fi
-    
-    # Проверка портов
-    local port_status=$(netstat -tuln | grep -c ":.*:.*LISTEN" || echo "0")
-    log "${BLUE}Открытых портов: $port_status${NC}"
-    
-    # Размер рабочей директории
-    if [ -d "/var/ton-work" ]; then
-        local work_size=$(du -sh /var/ton-work 2>/dev/null | cut -f1 || echo "N/A")
-        log "${BLUE}Размер рабочей директории: $work_size${NC}"
-    fi
-    
-    # Информация о пользователе
-    log "${BLUE}Пользователь TON: $TON_USER${NC}"
-    log "${BLUE}Рабочая директория: $WORKDIR${NC}"
-    
-    # Команды для управления
-    log "${YELLOW}=== КОМАНДЫ УПРАВЛЕНИЯ ===${NC}"
-    log "${BLUE}Запуск mytonctrl: sudo -u $TON_USER mytonctrl${NC}"
-    log "${BLUE}Проверка статуса: systemctl status ton-liteclient${NC}"
-    log "${BLUE}Просмотр логов: journalctl -u ton-liteclient -f${NC}"
-    log "${BLUE}Остановка: systemctl stop ton-liteclient${NC}"
-    log "${BLUE}Запуск: systemctl start ton-liteclient${NC}"
+    case $level in
+        "INFO")
+            echo -e "${GREEN}[INFO]${NC} $message"
+            echo "[$timestamp] [INFO] $message" >> "$LOG_FILE"
+            ;;
+        "WARN")
+            echo -e "${YELLOW}[WARN]${NC} $message"
+            echo "[$timestamp] [WARN] $message" >> "$LOG_FILE"
+            ;;
+        "ERROR")
+            echo -e "${RED}[ERROR]${NC} $message"
+            echo "[$timestamp] [ERROR] $message" >> "$LOG_FILE"
+            ;;
+        "DEBUG")
+            echo -e "${BLUE}[DEBUG]${NC} $message"
+            echo "[$timestamp] [DEBUG] $message" >> "$LOG_FILE"
+            ;;
+    esac
 }
 
 # Функция обработки ошибок
 error_handler() {
-    local exit_code=$?
-    local line_no=$1
-    
-    log "${RED}ОШИБКА на строке $line_no: Код выхода $exit_code${NC}"
-    log "${RED}Установка прервана${NC}"
-    
-    # Попытка очистки при ошибке
-    log "${YELLOW}Попытка очистки...${NC}"
-    clean > /dev/null 2>&1 || true
-    
-    exit $exit_code
+    local line_number=$1
+    log_message "ERROR" "Ошибка на строке $line_number. Код завершения: $?"
+    log_message "ERROR" "Установка прервана из-за критической ошибки"
+    cleanup
+    exit 1
 }
 
 # Установка обработчика ошибок
 trap 'error_handler $LINENO' ERR
 
-# Главная функция
-main() {
-    clear
+# Анимированный спиннер
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='|/-\'
+    local temp
     
-    log "${BLUE}=================================================${NC}"
-    log "${BLUE}    TON Light Client Auto-Installation Script    ${NC}"
-    log "${BLUE}=================================================${NC}"
-    log "${GREEN}Версия: 1.0${NC}"
-    log "${GREEN}Дата: $(date)${NC}"
-    log "${GREEN}Система: $(uname -a)${NC}"
-    log "${BLUE}=================================================${NC}"
+    while ps -p $pid > /dev/null 2>&1; do
+        temp=${spinstr#?}
+        printf "\r[%c] Выполняется..." "$spinstr"
+        spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+    done
+    printf "\r"
+}
+
+# Прогресс-бар
+progress_bar() {
+    local duration=$1
+    local step=$((duration / 50))
+    local progress=0
+    
+    for i in $(seq 1 50); do
+        printf "\r["
+        for j in $(seq 1 $i); do
+            printf "="
+        done
+        for j in $(seq $((i + 1)) 50); do
+            printf " "
+        done
+        printf "] %d%%" $((i * 2))
+        sleep $step
+    done
+    printf "\n"
+}
+
+# Проверка прав root
+check_root() {
+    log_message "INFO" "Проверка прав суперпользователя..."
+    
+    if [[ $EUID -ne 0 ]]; then
+        log_message "ERROR" "Скрипт должен быть запущен от имени root"
+        log_message "ERROR" "Используйте: sudo bash $0"
+        exit 1
+    fi
+    
+    log_message "INFO" "Права root подтверждены"
+}
+
+# Проверка системы
+check_system() {
+    log_message "INFO" "Проверка системы..."
+    
+    # Проверка версии Ubuntu
+    if ! grep -q "Ubuntu 22.04" /etc/os-release; then
+        log_message "WARN" "Обнаружена не Ubuntu 22.04. Продолжение на свой страх и риск"
+    fi
+    
+    # Проверка доступности интернета
+    if ! ping -c 1 google.com &> /dev/null; then
+        log_message "ERROR" "Нет доступа к интернету"
+        exit 1
+    fi
+    
+    # Проверка свободного места (минимум 20GB)
+    local free_space=$(df / | tail -1 | awk '{print $4}')
+    if [[ $free_space -lt 20971520 ]]; then
+        log_message "ERROR" "Недостаточно свободного места на диске (требуется минимум 20GB)"
+        exit 1
+    fi
+    
+    log_message "INFO" "Система проверена успешно"
+}
+
+# Создание пользователя tonuser
+create_user() {
+    log_message "INFO" "Создание пользователя $TONUSER..."
+    
+    if ! id "$TONUSER" &>/dev/null; then
+        useradd -m -s /bin/bash "$TONUSER" || {
+            log_message "ERROR" "Не удалось создать пользователя $TONUSER"
+            exit 1
+        }
+        log_message "INFO" "Пользователь $TONUSER создан"
+    else
+        log_message "INFO" "Пользователь $TONUSER уже существует"
+    fi
+    
+    # Добавление пользователя в группу sudo
+    usermod -aG sudo "$TONUSER" || {
+        log_message "ERROR" "Не удалось добавить пользователя в группу sudo"
+        exit 1
+    }
+}
+
+# Очистка предыдущих установок
+clean() {
+    log_message "INFO" "Очистка предыдущих установок TON..."
+    
+    # Остановка сервисов
+    systemctl stop ton-liteclient 2>/dev/null || true
+    systemctl stop mytoncore 2>/dev/null || true
+    systemctl stop validator 2>/dev/null || true
+    
+    # Удаление процессов
+    pkill -f "ton-lite-client" 2>/dev/null || true
+    pkill -f "mytoncore" 2>/dev/null || true
+    pkill -f "validator" 2>/dev/null || true
+    
+    # Удаление файлов и директорий
+    rm -rf /usr/local/bin/mytonctrl* 2>/dev/null || true
+    rm -rf /usr/local/bin/ton* 2>/dev/null || true
+    rm -rf /home/$TONUSER/.local/share/mytonctrl* 2>/dev/null || true
+    rm -rf /home/$TONUSER/ton* 2>/dev/null || true
+    rm -rf /opt/ton* 2>/dev/null || true
+    rm -rf /tmp/ton* 2>/dev/null || true
+    
+    # Удаление systemd сервисов
+    rm -f /etc/systemd/system/ton-*.service 2>/dev/null || true
+    rm -f /etc/systemd/system/mytoncore.service 2>/dev/null || true
+    
+    systemctl daemon-reload
+    
+    log_message "INFO" "Очистка завершена"
+}
+
+# Установка зависимостей
+install_deps() {
+    log_message "INFO" "Установка зависимостей..."
+    
+    # Обновление репозиториев
+    apt-get update -y || {
+        log_message "ERROR" "Не удалось обновить репозитории"
+        exit 1
+    }
+    
+    # Установка базовых пакетов
+    local packages=(
+        build-essential
+        cmake
+        clang
+        openssl
+        libssl-dev
+        zlib1g-dev
+        gperf
+        libreadline-dev
+        ccache
+        libmicrohttpd-dev
+        pkg-config
+        libsodium-dev
+        libsecp256k1-dev
+        git
+        wget
+        curl
+        python3
+        python3-pip
+        screen
+        htop
+        nano
+        jq
+        unzip
+    )
+    
+    for package in "${packages[@]}"; do
+        log_message "INFO" "Установка $package..."
+        apt-get install -y "$package" || {
+            log_message "ERROR" "Не удалось установить $package"
+            exit 1
+        }
+    done
+    
+    log_message "INFO" "Зависимости установлены"
+}
+
+# Создание исправленного скрипта установки mytonctrl
+create_fixed_installer() {
+    log_message "INFO" "Создание исправленного скрипта установки..."
+    
+    mkdir -p "$TEMP_DIR"
+    
+    # Скачивание оригинального скрипта
+    wget -O "$TEMP_DIR/install.sh" "https://raw.githubusercontent.com/ton-blockchain/mytonctrl/master/scripts/install.sh" || {
+        log_message "ERROR" "Не удалось скачать скрипт установки"
+        exit 1
+    }
+    
+    # Создание исправленной версии
+    cat > "$TEMP_DIR/install_fixed.sh" << 'EOF'
+#!/bin/bash
+
+# Исправленный скрипт установки mytonctrl для liteserver режима
+# Убираем проверку root и добавляем флаг для liteserver
+
+set -e
+
+# Переменные
+TONUSER="tonuser"
+INSTALL_DIR="/home/$TONUSER"
+
+# Функции из оригинального скрипта (без проверки root)
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
+}
+
+# Основная логика установки
+main() {
+    log "Начало установки mytonctrl в режиме liteserver"
+    
+    # Переход в домашнюю директорию пользователя
+    cd "$INSTALL_DIR"
+    
+    # Клонирование репозитория
+    if [ -d "mytonctrl" ]; then
+        rm -rf mytonctrl
+    fi
+    
+    git clone https://github.com/ton-blockchain/mytonctrl.git
+    cd mytonctrl
+    
+    # Установка с игнорированием системных требований в режиме liteserver
+    python3 install.py -i -t liteserver
+    
+    log "Установка mytonctrl завершена"
+}
+
+# Запуск от имени tonuser
+if [ "$USER" != "$TONUSER" ]; then
+    log "Переключение на пользователя $TONUSER"
+    sudo -u "$TONUSER" bash "$0"
+    exit $?
+fi
+
+main
+EOF
+
+    chmod +x "$TEMP_DIR/install_fixed.sh"
+    log_message "INFO" "Исправленный скрипт создан"
+}
+
+# Сборка и установка TON
+build() {
+    log_message "INFO" "Сборка и установка TON Light Client..."
+    
+    # Создание исправленного скрипта
+    create_fixed_installer
+    
+    # Установка как root, но с переключением на tonuser
+    log_message "INFO" "Запуск установки mytonctrl..."
+    (
+        cd "$TEMP_DIR"
+        bash install_fixed.sh
+    ) &
+    
+    local install_pid=$!
+    
+    # Показываем спиннер во время установки
+    spinner $install_pid
+    
+    # Ждем завершения установки
+    wait $install_pid || {
+        log_message "ERROR" "Установка mytonctrl завершилась с ошибкой"
+        exit 1
+    }
+    
+    log_message "INFO" "Установка mytonctrl завершена успешно"
+}
+
+# Запуск Light Client
+run_lightclient() {
+    log_message "INFO" "Запуск TON Light Client..."
+    
+    # Создание systemd сервиса для liteserver
+    cat > /etc/systemd/system/ton-liteserver.service << EOF
+[Unit]
+Description=TON Liteserver
+After=network.target
+
+[Service]
+Type=simple
+User=$TONUSER
+WorkingDirectory=/home/$TONUSER
+ExecStart=/usr/local/bin/mytonctrl liteserver
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable ton-liteserver
+    systemctl start ton-liteserver
+    
+    log_message "INFO" "TON Light Client запущен"
+}
+
+# Ожидание синхронизации
+wait_sync() {
+    log_message "INFO" "Ожидание синхронизации с сетью TON..."
+    
+    local sync_timeout=3600  # 1 час
+    local start_time=$(date +%s)
+    
+    while true; do
+        local current_time=$(date +%s)
+        local elapsed=$((current_time - start_time))
+        
+        if [ $elapsed -gt $sync_timeout ]; then
+            log_message "ERROR" "Превышено время ожидания синхронизации"
+            exit 1
+        fi
+        
+        # Проверка статуса синхронизации через mytonctrl
+        local sync_status=$(sudo -u "$TONUSER" mytonctrl -c "status" 2>/dev/null | grep -i "out of sync" || echo "synced")
+        
+        if [[ "$sync_status" == *"synced"* ]] || [[ "$sync_status" == *"< 20"* ]]; then
+            log_message "INFO" "Синхронизация завершена успешно"
+            break
+        fi
+        
+        log_message "INFO" "Синхронизация в процессе... ($elapsed сек)"
+        sleep 30
+    done
+}
+
+# Отображение статуса
+show_status() {
+    log_message "INFO" "Отображение статуса системы..."
+    
+    echo -e "\n${GREEN}=== СТАТУС УСТАНОВКИ TON LIGHT CLIENT ===${NC}"
+    echo -e "${BLUE}Пользователь TON:${NC} $TONUSER"
+    echo -e "${BLUE}Директория установки:${NC} /home/$TONUSER"
+    echo -e "${BLUE}Статус сервиса:${NC} $(systemctl is-active ton-liteserver)"
+    echo -e "${BLUE}Лог-файл:${NC} $LOG_FILE"
+    
+    echo -e "\n${GREEN}=== КОМАНДЫ УПРАВЛЕНИЯ ===${NC}"
+    echo -e "${BLUE}Статус:${NC} systemctl status ton-liteserver"
+    echo -e "${BLUE}Запуск:${NC} systemctl start ton-liteserver"
+    echo -e "${BLUE}Остановка:${NC} systemctl stop ton-liteserver"
+    echo -e "${BLUE}MyTonCtrl:${NC} sudo -u $TONUSER mytonctrl"
+    
+    echo -e "\n${GREEN}=== УСТАНОВКА ЗАВЕРШЕНА ===${NC}"
+}
+
+# Функция очистки при ошибке
+cleanup() {
+    log_message "INFO" "Очистка временных файлов..."
+    rm -rf "$TEMP_DIR" 2>/dev/null || true
+}
+
+# Основная функция
+main() {
+    log_message "INFO" "Запуск установки TON Light Client на $(date)"
     
     # Создание лог-файла
+    mkdir -p "$(dirname "$LOG_FILE")"
     touch "$LOG_FILE"
     chmod 644 "$LOG_FILE"
     
@@ -426,15 +427,9 @@ main() {
     wait_sync
     show_status
     
-    log "${GREEN}=================================================${NC}"
-    log "${GREEN}  УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО!${NC}"
-    log "${GREEN}=================================================${NC}"
-    log "${YELLOW}Для использования TON Light Client:${NC}"
-    log "${BLUE}1. Подключитесь как пользователь $TON_USER: su - $TON_USER${NC}"
-    log "${BLUE}2. Запустите mytonctrl: mytonctrl${NC}"
-    log "${BLUE}3. Проверьте статус: status${NC}"
-    log "${GREEN}=================================================${NC}"
+    log_message "INFO" "Установка TON Light Client завершена успешно!"
+    cleanup
 }
 
-# Запуск скрипта
+# Запуск основной функции
 main "$@"
