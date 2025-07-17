@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # Полный скрипт установки TON Light Client (liteserver) на Ubuntu 22.04
-# Исправленная версия для работы с актуальным mytonctrl
+# Исправленная версия с правильными путями для tonuser
 
 set -e  # Останавливаться при первой ошибке
 
 # Глобальные переменные
 LOG_FILE="/var/log/ton-install.log"
 TONUSER="tonuser"
-INSTALL_DIR="/opt/ton"
-MYTONCTRL_DIR="/usr/local/bin/mytonctrl"
+TONUSER_HOME="/home/$TONUSER"
+INSTALL_DIR="$TONUSER_HOME/mytonctrl"
 TEMP_DIR="/tmp/ton-install"
 
 # Цвета для вывода
@@ -73,26 +73,6 @@ spinner() {
     printf "\r"
 }
 
-# Прогресс-бар
-progress_bar() {
-    local duration=$1
-    local step=$((duration / 50))
-    local progress=0
-    
-    for i in $(seq 1 50); do
-        printf "\r["
-        for j in $(seq 1 $i); do
-            printf "="
-        done
-        for j in $(seq $((i + 1)) 50); do
-            printf " "
-        done
-        printf "] %d%%" $((i * 2))
-        sleep $step
-    done
-    printf "\n"
-}
-
 # Проверка прав root
 check_root() {
     log_message "INFO" "Проверка прав суперпользователя..."
@@ -150,6 +130,13 @@ create_user() {
         log_message "ERROR" "Не удалось добавить пользователя в группу sudo"
         exit 1
     }
+    
+    # Создание директорий с правильными правами
+    mkdir -p "$TONUSER_HOME"
+    chown "$TONUSER:$TONUSER" "$TONUSER_HOME"
+    chmod 755 "$TONUSER_HOME"
+    
+    log_message "INFO" "Пользователь $TONUSER настроен"
 }
 
 # Очистка предыдущих установок
@@ -169,10 +156,14 @@ clean() {
     # Удаление файлов и директорий
     rm -rf /usr/local/bin/mytonctrl* 2>/dev/null || true
     rm -rf /usr/local/bin/ton* 2>/dev/null || true
-    rm -rf /home/$TONUSER/.local/share/mytonctrl* 2>/dev/null || true
-    rm -rf /home/$TONUSER/ton* 2>/dev/null || true
+    rm -rf /usr/src/mytonctrl* 2>/dev/null || true
+    rm -rf /usr/src/ton* 2>/dev/null || true
+    rm -rf "$TONUSER_HOME"/.local/share/mytonctrl* 2>/dev/null || true
+    rm -rf "$TONUSER_HOME"/mytonctrl* 2>/dev/null || true
+    rm -rf "$TONUSER_HOME"/ton* 2>/dev/null || true
     rm -rf /opt/ton* 2>/dev/null || true
     rm -rf /tmp/ton* 2>/dev/null || true
+    rm -rf /var/ton* 2>/dev/null || true
     
     # Удаление systemd сервисов
     rm -f /etc/systemd/system/ton-*.service 2>/dev/null || true
@@ -218,6 +209,7 @@ install_deps() {
         nano
         jq
         unzip
+        sudo
     )
     
     for package in "${packages[@]}"; do
@@ -232,82 +224,83 @@ install_deps() {
 }
 
 # Создание исправленного скрипта установки mytonctrl
-create_fixed_installer() {
-    log_message "INFO" "Создание исправленного скрипта установки..."
+create_installer_script() {
+    log_message "INFO" "Создание скрипта установки mytonctrl..."
     
     mkdir -p "$TEMP_DIR"
     
-    # Скачивание оригинального скрипта
-    wget -O "$TEMP_DIR/install.sh" "https://raw.githubusercontent.com/ton-blockchain/mytonctrl/master/scripts/install.sh" || {
-        log_message "ERROR" "Не удалось скачать скрипт установки"
-        exit 1
-    }
-    
-    # Создание исправленной версии
-    cat > "$TEMP_DIR/install_fixed.sh" << 'EOF'
+    # Создание скрипта установки для tonuser
+    cat > "$TEMP_DIR/install_mytonctrl.sh" << 'EOF'
 #!/bin/bash
 
-# Исправленный скрипт установки mytonctrl для liteserver режима
-# Убираем проверку root и добавляем флаг для liteserver
-
+# Скрипт установки mytonctrl от имени tonuser
 set -e
 
-# Переменные
 TONUSER="tonuser"
-INSTALL_DIR="/home/$TONUSER"
+TONUSER_HOME="/home/$TONUSER"
+INSTALL_DIR="$TONUSER_HOME/mytonctrl"
 
-# Функции из оригинального скрипта (без проверки root)
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
 }
 
-# Основная логика установки
 main() {
-    log "Начало установки mytonctrl в режиме liteserver"
+    log "Начало установки mytonctrl от пользователя $USER"
     
-    # Переход в домашнюю директорию пользователя
-    cd "$INSTALL_DIR"
+    # Убедимся, что мы в правильной директории
+    cd "$TONUSER_HOME"
     
-    # Клонирование репозитория
+    # Клонирование репозитория mytonctrl
     if [ -d "mytonctrl" ]; then
+        log "Удаление существующего репозитория mytonctrl"
         rm -rf mytonctrl
     fi
     
-    git clone https://github.com/ton-blockchain/mytonctrl.git
+    log "Клонирование репозитория mytonctrl..."
+    git clone https://github.com/ton-blockchain/mytonctrl.git || {
+        log "Ошибка: не удалось клонировать репозиторий"
+        exit 1
+    }
+    
+    # Переход в директорию mytonctrl
     cd mytonctrl
     
-    # Установка с игнорированием системных требований в режиме liteserver
-    python3 install.py -i -t liteserver
+    # Установка mytonctrl в режиме liteserver
+    log "Запуск mytoninstaller.py в режиме liteserver..."
+    python3 mytoninstaller.py -m liteserver -i || {
+        log "Ошибка: не удалось установить mytonctrl"
+        exit 1
+    }
     
-    log "Установка mytonctrl завершена"
+    log "Установка mytonctrl завершена успешно"
 }
 
-# Запуск от имени tonuser
+# Проверка, что скрипт запущен от имени tonuser
 if [ "$USER" != "$TONUSER" ]; then
-    log "Переключение на пользователя $TONUSER"
-    sudo -u "$TONUSER" bash "$0"
-    exit $?
+    log "Ошибка: скрипт должен быть запущен от имени пользователя $TONUSER"
+    exit 1
 fi
 
 main
 EOF
 
-    chmod +x "$TEMP_DIR/install_fixed.sh"
-    log_message "INFO" "Исправленный скрипт создан"
+    chmod +x "$TEMP_DIR/install_mytonctrl.sh"
+    chown "$TONUSER:$TONUSER" "$TEMP_DIR/install_mytonctrl.sh"
+    
+    log_message "INFO" "Скрипт установки создан"
 }
 
 # Сборка и установка TON
 build() {
     log_message "INFO" "Сборка и установка TON Light Client..."
     
-    # Создание исправленного скрипта
-    create_fixed_installer
+    # Создание скрипта установки
+    create_installer_script
     
-    # Установка как root, но с переключением на tonuser
-    log_message "INFO" "Запуск установки mytonctrl..."
+    # Запуск установки от имени tonuser
+    log_message "INFO" "Запуск установки mytonctrl от пользователя $TONUSER..."
     (
-        cd "$TEMP_DIR"
-        bash install_fixed.sh
+        su - "$TONUSER" -c "$TEMP_DIR/install_mytonctrl.sh"
     ) &
     
     local install_pid=$!
@@ -324,33 +317,88 @@ build() {
     log_message "INFO" "Установка mytonctrl завершена успешно"
 }
 
-# Запуск Light Client
-run_lightclient() {
-    log_message "INFO" "Запуск TON Light Client..."
+# Настройка systemd сервиса
+setup_systemd_service() {
+    log_message "INFO" "Настройка systemd сервиса..."
     
-    # Создание systemd сервиса для liteserver
-    cat > /etc/systemd/system/ton-liteserver.service << EOF
+    # Создание systemd сервиса для mytoncore
+    cat > /etc/systemd/system/mytoncore.service << EOF
 [Unit]
-Description=TON Liteserver
+Description=MyTonCore Service
 After=network.target
 
 [Service]
 Type=simple
 User=$TONUSER
-WorkingDirectory=/home/$TONUSER
-ExecStart=/usr/local/bin/mytonctrl liteserver
+Group=$TONUSER
+WorkingDirectory=$TONUSER_HOME/mytonctrl
+ExecStart=/usr/bin/python3 $TONUSER_HOME/mytonctrl/mytoncore.py
 Restart=always
 RestartSec=10
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+    # Создание сервиса для liteserver
+    cat > /etc/systemd/system/ton-liteserver.service << EOF
+[Unit]
+Description=TON Liteserver
+After=network.target mytoncore.service
+
+[Service]
+Type=simple
+User=$TONUSER
+Group=$TONUSER
+WorkingDirectory=$TONUSER_HOME/mytonctrl
+ExecStart=/usr/bin/python3 $TONUSER_HOME/mytonctrl/mytonctrl.py --liteserver
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Перезагрузка systemd и включение сервисов
     systemctl daemon-reload
+    systemctl enable mytoncore
     systemctl enable ton-liteserver
+    
+    log_message "INFO" "Systemd сервисы настроены"
+}
+
+# Запуск Light Client
+run_lightclient() {
+    log_message "INFO" "Запуск TON Light Client..."
+    
+    # Настройка systemd сервиса
+    setup_systemd_service
+    
+    # Запуск сервисов
+    systemctl start mytoncore
+    sleep 10
     systemctl start ton-liteserver
     
     log_message "INFO" "TON Light Client запущен"
+}
+
+# Проверка статуса mytonctrl
+check_mytonctrl_status() {
+    log_message "INFO" "Проверка статуса mytonctrl..."
+    
+    # Проверка через sudo -u tonuser
+    local status_output
+    status_output=$(sudo -u "$TONUSER" bash -c "cd $TONUSER_HOME/mytonctrl && python3 mytonctrl.py -c 'status'" 2>&1) || {
+        log_message "WARN" "Не удалось получить статус mytonctrl"
+        return 1
+    }
+    
+    log_message "INFO" "Статус mytonctrl: $status_output"
+    return 0
 }
 
 # Ожидание синхронизации
@@ -369,17 +417,17 @@ wait_sync() {
             exit 1
         fi
         
-        # Проверка статуса синхронизации через mytonctrl
-        local sync_status=$(sudo -u "$TONUSER" mytonctrl -c "status" 2>/dev/null | grep -i "out of sync" || echo "synced")
-        
-        if [[ "$sync_status" == *"synced"* ]] || [[ "$sync_status" == *"< 20"* ]]; then
-            log_message "INFO" "Синхронизация завершена успешно"
+        # Проверка статуса синхронизации
+        if check_mytonctrl_status; then
+            log_message "INFO" "MyTonCtrl отвечает корректно"
             break
         fi
         
-        log_message "INFO" "Синхронизация в процессе... ($elapsed сек)"
+        log_message "INFO" "Ожидание инициализации mytonctrl... ($elapsed сек)"
         sleep 30
     done
+    
+    log_message "INFO" "Синхронизация завершена"
 }
 
 # Отображение статуса
@@ -388,15 +436,19 @@ show_status() {
     
     echo -e "\n${GREEN}=== СТАТУС УСТАНОВКИ TON LIGHT CLIENT ===${NC}"
     echo -e "${BLUE}Пользователь TON:${NC} $TONUSER"
-    echo -e "${BLUE}Директория установки:${NC} /home/$TONUSER"
-    echo -e "${BLUE}Статус сервиса:${NC} $(systemctl is-active ton-liteserver)"
+    echo -e "${BLUE}Домашняя директория:${NC} $TONUSER_HOME"
+    echo -e "${BLUE}Директория установки:${NC} $INSTALL_DIR"
+    echo -e "${BLUE}Статус mytoncore:${NC} $(systemctl is-active mytoncore 2>/dev/null || echo 'неактивен')"
+    echo -e "${BLUE}Статус liteserver:${NC} $(systemctl is-active ton-liteserver 2>/dev/null || echo 'неактивен')"
     echo -e "${BLUE}Лог-файл:${NC} $LOG_FILE"
     
     echo -e "\n${GREEN}=== КОМАНДЫ УПРАВЛЕНИЯ ===${NC}"
-    echo -e "${BLUE}Статус:${NC} systemctl status ton-liteserver"
-    echo -e "${BLUE}Запуск:${NC} systemctl start ton-liteserver"
-    echo -e "${BLUE}Остановка:${NC} systemctl stop ton-liteserver"
-    echo -e "${BLUE}MyTonCtrl:${NC} sudo -u $TONUSER mytonctrl"
+    echo -e "${BLUE}Статус mytoncore:${NC} systemctl status mytoncore"
+    echo -e "${BLUE}Статус liteserver:${NC} systemctl status ton-liteserver"
+    echo -e "${BLUE}Запуск mytonctrl:${NC} sudo -u $TONUSER bash -c 'cd $INSTALL_DIR && python3 mytonctrl.py'"
+    echo -e "${BLUE}Проверка статуса:${NC} sudo -u $TONUSER bash -c 'cd $INSTALL_DIR && python3 mytonctrl.py -c status'"
+    echo -e "${BLUE}Логи mytoncore:${NC} journalctl -u mytoncore -f"
+    echo -e "${BLUE}Логи liteserver:${NC} journalctl -u ton-liteserver -f"
     
     echo -e "\n${GREEN}=== УСТАНОВКА ЗАВЕРШЕНА ===${NC}"
 }
